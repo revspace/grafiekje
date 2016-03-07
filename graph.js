@@ -1,18 +1,19 @@
 "use strict";
 
-var INFLUX_URL = "http://192.168.1.14:8086/query";
-var INFLUX_DATABASE = "mqtt";
+const INFLUX_URL = "http://192.168.1.14:8086/query";
+const INFLUX_DATABASE = "mqtt";
 
-var POINT_SIZE = 5;
-var UPDATE_INTERVAL = 10000;
+const POINT_SIZE = 5;
+const UPDATE_INTERVAL = 10000;
 
-var MARGIN = {top: 30, right: 80, bottom: 30, left: 80},
-    GRAPH_WIDTH  = 960 - MARGIN.left - MARGIN.right,
-    GRAPH_HEIGHT  = 500 - MARGIN.top - MARGIN.bottom;
+const MARGIN = {top: 10, right: 60, bottom: 30, left: 60},
+    FULL_WIDTH   = 960, FULL_HEIGHT = 500,
+    GRAPH_WIDTH  = FULL_WIDTH - MARGIN.left - MARGIN.right,
+    GRAPH_HEIGHT = FULL_HEIGHT - MARGIN.top - MARGIN.bottom;
 
 var influxTime = d3.time.format.iso;
 
-var lastUpdateFormatter = d3.time.format("%Y-%m-%d %H:%M:%S");
+var spaceState = [];
 
 function influxQuery(query, callback) {
 	let full_url = INFLUX_URL + '?db=' + encodeURIComponent(INFLUX_DATABASE) + '&q=' + encodeURIComponent(query).replace("%20","+");
@@ -24,11 +25,10 @@ function sensibleRange(array, accessor) {
 	return [d3.quantile(sorted, 0.01), d3.quantile(sorted, 0.99)];
 }
 
-function autoScale(graph) {
-	let allData = d3.selectAll("g.datapoints path").data();
 
-	let xExtents = d3.extent(allData, function(d) { return d.x; }),
-	    yExtents = sensibleRange(allData, function(d) { return d.y; });
+function autoScale(graph, data) {
+	let xExtents = d3.extent(data, function(d) { return d.x; }),
+	    yExtents = sensibleRange(data, function(d) { return d.y; });
 
 	graph.xScale.domain(xExtents).nice(d3.time.hour);
 	graph.yScale.domain(yExtents).nice();
@@ -39,22 +39,68 @@ function autoScale(graph) {
 	updateScales(graph);
 }
 
-function pointToScreen(graph) {
-	return function(d) {
-		return "translate(" + graph.xScale(d.x) + ","+graph.yScale(d.y)+")";
-	}
-}
-
 function updateScales(graph) {
 	let g = d3.select(graph);
-	g.selectAll("g.datapoints path")
-		.attr("transform", pointToScreen(graph));
+	
+	g.select(".xAxis").call(graph.xAxis);
+	g.select(".yAxis").call(graph.yAxis);
 
-	g.selectAll("path.dataline")
-		.attr("d", graph.dataLine);
+	let ctx = g.select("canvas")[0][0].getContext("2d");
+	ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
 
-	g.select("g.axis--x").call(graph.xAxis);
-	g.select("g.axis--y").call(graph.yAxis);
+	spaceState.forEach(function(block,idx) {
+		switch(block[2]) {
+			case "open":   ctx.fillStyle = "rgba(0,256,0,0.2)";   break;
+			case "closed": ctx.fillStyle = "rgba(256,0,0,0.2)";   break;
+			default:       ctx.fillStyle = "rgba(256,256,0,0.2)"; break;
+		}
+
+		let start = block[0] ? graph.xScale(block[0]) : 0,
+		    end   = block[1] ? graph.xScale(block[1]) : ctx.canvas.width;
+
+		if((start > ctx.canvas.width) || (end < 0)) return;
+
+		ctx.fillRect(start, 0, end-start, ctx.canvas.height);
+
+		let nextBlock = spaceState[idx+1];
+		if(!nextBlock) return;
+		else if(nextBlock[2] == "open")   ctx.strokeStyle = "rgba(0,256,0,0.4)";
+		else if(nextBlock[2] == "closed") ctx.strokeStyle = "rgba(256,0,0,0.4)";
+		else return;
+
+		ctx.lineWidth = 2;
+		ctx.beginPath();
+		ctx.moveTo(end, 0);
+		ctx.lineTo(end, ctx.canvas.height);
+		ctx.stroke();
+	});
+
+	let line = d3_shape.line()
+		.x(function(d) { return graph.xScale(d.x); })
+		.y(function(d) { return graph.yScale(d.y); })
+		.curve(d3_shape.curveStepBefore);
+
+	let symbol = d3_shape.symbol()
+		.size(6);
+
+	graph.data.forEach(function(data, idx) {
+		let c = d3.rgb(graph.colorScale(graph.topics[idx]));
+
+		ctx.beginPath();
+		line.context(ctx)(data);
+		ctx.strokeStyle = 'rgba('+c.r+','+c.g+','+c.b+',0.7)';
+		ctx.lineWidth = 1;
+		ctx.stroke();
+
+		ctx.fillStyle = c.toString();
+		data.forEach(function(d) {
+			ctx.beginPath();
+			ctx.setTransform(1,0,0,1,graph.xScale(d.x),graph.yScale(d.y));
+			symbol.context(ctx)();
+			ctx.fill();
+		});
+		ctx.setTransform(1,0,0,1,0,0);
+	});
 }
 
 function graphDataReceived(graph, error, json) {
@@ -62,7 +108,7 @@ function graphDataReceived(graph, error, json) {
 
 	if(!json.results) return console.warn("Results field lacking from InfluxDB query response");
 
-	var first_time = !(d3.select(graph).selectAll("g.datapoints path").data().length);
+	var first_time = !(graph.data[0].length);
 
 	for(let result of json.results) {
 		if(!result.series) continue;	// empty data set
@@ -72,40 +118,52 @@ function graphDataReceived(graph, error, json) {
 
 		if(topicIndex == -1) return console.warn("Got data for unknown topic "+topic+".");
 
-		let dataGroup = d3.select(graph).select('g[data-topic="'+topic.replace('"','\\"')+'"]');
+		let newData = result.series[0].values.map(function(d) { return { "x":influxTime.parse(d[0]), "y":d[1] }; });
+		Array.prototype.push.apply(graph.data[topicIndex], newData);
 
-		let data = result.series[0].values.map(function(d) { return { "x":influxTime.parse(d[0]), "y":d[1] }; });
-
-		let enter = dataGroup.select("g.datapoints").selectAll("path")
-			.data(data)
-			.enter().append("path")
-			.attr("d", d3.svg.symbol().size(POINT_SIZE));
-
-		let dl = dataGroup.select("path.dataline");
-
-		if(first_time) {
-			dl.datum(data);
-		} else {
-			enter.attr("transform", pointToScreen(graph));
-			
-			Array.prototype.push.apply(dl.datum(), data);
-			dl.attr("d", graph.dataLine);
-		}
-
-		graph.lastUpdate[topicIndex] = new Date();
+		graph.lastUpdate[topicIndex] = newData[newData.length-1].x;
 	}
 
 	if(first_time) {
-		autoScale(graph);
-		d3.select(graph).selectAll("g.datapoints path")
-			.attr("transform", pointToScreen(graph));
-		d3.select(graph).selectAll("path.dataline")
-			.attr("d", graph.dataLine);
+		let allData = d3.merge(json.results.map(function(r) { return r.series[0].values.map(function(d) { return { "x":influxTime.parse(d[0]), "y":d[1] }; }); }));
+
+		autoScale(graph, allData);
 	}
 }
 
 function spaceStateDataReceived(error, json) {
+	if(error) return console.warn(error);
+	if(!json.results) return console.warn("Results field lacking from InfluxDB query response");
 
+	let result = json.results[0];
+	if(!result.series)
+		return;
+
+	let newData = result.series[0].values;
+	
+	let offset, prevTime, prevState;
+	if(spaceState.length) {
+		let prevBlock = spaceState.pop();
+		prevTime  = prevBlock[0];
+		prevState = prevBlock[2];
+	} else {
+		spaceState = []
+		prevTime   = null;
+		prevState  = null;
+	}
+
+	newData.forEach(function(record, idx) {
+		let time  = influxTime.parse(record[0]),
+		    state = record[1];
+
+		if(prevState != state) {
+			spaceState.push([prevTime, time, prevState]);
+			prevState = state;
+			prevTime = time;
+		}
+	});
+
+	spaceState.push([prevTime, new Date(), prevState]);
 }
 
 function updateGraph(graph) {
@@ -113,13 +171,23 @@ function updateGraph(graph) {
 	graph.topics.forEach(function(topic, idx) {
 		query += "SELECT value FROM \""+topic.replace('"', '\\"')+"\"";
 		if(graph.lastUpdate[idx])
-			query += " WHERE time >= '" + influxTime(graph.lastUpdate[idx]) + "'";
+			query += " WHERE time > '" + influxTime(graph.lastUpdate[idx]) + "'";
 		else
-			query += " WHERE time >= now() - 24h";
+			query += " WHERE time > now() - 24h";
 		query += ';';
 	});
 	influxQuery(query, function(error, json) { return graphDataReceived(graph, error, json); });
 	graph.updateTimer = window.setTimeout(updateGraph, UPDATE_INTERVAL, graph);
+}
+
+function updateSpaceState() {
+	let query;
+	if(spaceState.length)
+		query = 'SELECT * FROM "revspace/state" WHERE time > \''+influxTime(spaceState[spaceState.length-1][0])+'\' + 1s;';
+	else
+		query = 'SELECT * FROM "revspace/state" WHERE time > now() - 24h;';
+	influxQuery(query, spaceStateDataReceived);
+	window.setTimeout(updateSpaceState, UPDATE_INTERVAL);
 }
 
 function formatValue(unit) {
@@ -130,7 +198,7 @@ function formatValue(unit) {
 }
 
 function setupGraph() {
-	let graph = this;
+	let graph = this, g = d3.select(this);
 
 	let data = this.dataset;
 
@@ -144,8 +212,6 @@ function setupGraph() {
 	graph.title  = data.title  ? data.title                 : "";
 
 	graph.lastUpdate = {};
-
-	let svg = d3.select(graph).append("svg")
 
 	graph.xScale = d3.time.scale()
 		.domain([new Date(), new Date()])
@@ -165,6 +231,7 @@ function setupGraph() {
 	graph.zoom = d3.behavior.zoom()
 		.x(graph.xScale)
 		.y(graph.yScale)
+		.scaleExtent([0.1, 42])
 		.on("zoom", function() { updateScales(graph); } );
 
 	graph.dataLine = d3.svg.line()
@@ -172,24 +239,7 @@ function setupGraph() {
 		.y(function(d) { return graph.yScale(d.y); })
 		.interpolate(graph.interp);
 
-	svg.attr("viewBox", "-"+MARGIN.left + " -" + MARGIN.top + " " + (GRAPH_WIDTH+MARGIN.left+MARGIN.right) + " " + (GRAPH_HEIGHT+MARGIN.top+MARGIN.bottom))
-		.call(graph.zoom);
-
-	svg.append("clipPath")
-		.attr("id", "clip")
-		.append("rect")
-		.attr("x", 0)
-		.attr("y", 0)
-		.attr("width", GRAPH_WIDTH)
-		.attr("height", GRAPH_HEIGHT);
-
-	svg.append("text")
-		.attr("class", "title")
-		.attr("x", 10)
-		.attr("y", 10)
-		.text(graph.title);
-
-	let legend = d3.select(graph).append("ul")
+	let legend = g.append("ul")
 		.attr("class", "legend");
 
 	graph.names.forEach(function(name, idx) {
@@ -204,48 +254,47 @@ function setupGraph() {
 			.scale(graph.xScale)
 			.orient("bottom")
 			.tickFormat(graph.xScale.tickFormat())
-			.ticks(15)
-			.tickSize(-GRAPH_HEIGHT);
+			.ticks(10)
+			.tickSize(-GRAPH_HEIGHT)
+			.tickPadding(8);
 
 	graph.yAxis = d3.svg.axis()
 			.scale(graph.yScale)
 			.orient("left")
-			.tickFormat(formatValue(graph.unit))
-			.ticks(10)
-			.tickSize(-GRAPH_WIDTH);
+			.ticks(5,formatValue(graph.unit))
+			.tickSize(-GRAPH_WIDTH)
+			.tickPadding(8);
 
-	svg.append("g")
-		.attr("class", "axis axis--x")
-		.attr("transform", "translate(0," + GRAPH_HEIGHT + ")")
+	let axes = g.select(".axes")
+		.attr("width",  FULL_WIDTH)
+		.attr("height", FULL_HEIGHT)
+		.attr("viewbox", (-MARGIN.left)+" "+(-MARGIN.top)+" "+FULL_WIDTH+" "+FULL_HEIGHT);
+
+	axes.append("g")
+		.attr("class", "axis xAxis")
+		.attr("transform", "translate("+MARGIN.left+","+(MARGIN.top+GRAPH_HEIGHT)+")")
 		.call(graph.xAxis);
 
-	svg.append("g")
-		.attr("class", "axis axis--y")
-		.attr("transform", "translate(0,0)")
+	axes.append("g")
+		.attr("class", "axis yAxis")
+		.attr("transform", "translate("+MARGIN.left+","+MARGIN.top+")")
 		.call(graph.yAxis);
 
-	for(let topic of graph.topics) {
-		let group = svg.append("g")
-			.attr("class", "dataSet")
-			.attr("data-topic", topic)
-			.style("fill", graph.colorScale(topic))
-			.style("stroke", graph.colorScale(topic));
+	let canvas = g.select("canvas")
+		.attr("width",  GRAPH_WIDTH)
+		.attr("height", GRAPH_HEIGHT)
+		.style("left",  MARGIN.left)
+		.style("top",   MARGIN.top)
+		.call(graph.zoom);
 
-		group.append("g")
-			.attr("class", "datapoints")
-			.attr("clip-path", "url(#clip)");
-
-		group.append("path")
-			.attr("class", "dataline");
-	}
-
-	d3.select(graph).append("footer");
+	graph.data = graph.topics.map(function(topic) { return []; });
 
 	updateGraph(graph);
 }
 
 function setup() {
 	d3.selectAll(".graph").each(setupGraph);
+	updateSpaceState();
 }
 
 window.addEventListener("load", setup);
