@@ -1,0 +1,85 @@
+body {
+	color: black;
+	background: white none;
+	font: 12pt sans-serif;
+}
+
+.graph {
+	display: block;
+	width: 80%;
+	margin: 0 auto;
+	padding: 0;
+
+	position: relative;
+	left: 0;
+	top: 0;
+}
+
+.graph .title {
+	dominant-baseline: hanging;
+	font: bold 32pt sans-serif;
+	opacity: 0.2;
+}
+
+.graph footer {
+	margin-left: 70px;
+	font-size: 8pt;
+}
+
+.graph svg {
+	display: block;
+	margin: 0;
+	padding: 0;
+}
+
+ul.legend {
+	display: block;
+	position: absolute;
+	right: 110;
+	top: 40;
+	font: 10pt sans-serif;
+	z-index: 100;
+	opacity: 0.7;
+	border: 1px solid black;
+	padding: 0;
+	width: fit-content;
+	list-style-type: none;
+}
+
+ul.legend li {
+	color: white;
+	margin: 0;
+	padding: 0.5ex 1ex;
+	font-weight: bold;
+	min-width: fit-content;
+}
+
+g.datapoints > path {
+	stroke: none;
+}
+
+.dataline {
+	stroke-opacity: 0.4;
+	stroke-width: 1.5px;
+	fill: none;
+}
+
+.axis path,
+.axis line {
+	fill: none;
+	stroke: #000;
+	shape-rendering: crispEdges;
+}
+
+.axis line {
+	stroke-opacity: 0.2;
+}
+
+.axis text {
+	font: 8pt sans-serif;
+}
+
+.pane {
+	fill: none;
+	pointer-events: all;
+}
