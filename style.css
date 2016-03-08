@@ -4,6 +4,22 @@ body {
 	font: 12pt sans-serif;
 }
 
+ul.nav {
+	display: flex;
+	flex-flow: row nowrap;
+	justify-content: space-around;
+	margin: 5px auto;
+	padding: 0;
+	width: 40%;
+	list-style-type: none;
+}
+
+ul.nav li {
+	display: block;
+	margin: 10px;
+	padding: 0;
+}
+
 .graph {
 	display: block;
 	width: fit-content;
@@ -30,20 +46,22 @@ body {
 	position: absolute;
 }
 
-ul.legend {
+.sidebar {
 	display: block;
 	position: absolute;
 	left: 900px;
-	top: 10px;
-	font: 10pt sans-serif;
-	z-index: 100;
-	opacity: 0.7;
-	border: 1px solid black;
+	list-style-type: none;
 	padding: 0;
 	margin: 0;
+	font: 10pt sans-serif;
+	border: 1px solid black;
+	z-index: 1;
+}
+
+ul.legend {
+	top: 10px;
 	width: fit-content;
 	width: -moz-fit-content;
-	list-style-type: none;
 }
 
 ul.legend li {
@@ -51,6 +69,22 @@ ul.legend li {
 	margin: 0;
 	padding: 0.5ex 1ex;
 	font-weight: bold;
+	min-width: fit-content;
+	min-width: -moz-fit-content;
+}
+
+.controls {
+	display: flex;
+	flex-flow: row wrap;
+	justify-content: stretch;
+	background: #333 none;
+	bottom: 29px;
+	width: 100px;
+}
+
+.controls button {
+	margin: 5px;
+	flex: 1 0;
 	min-width: fit-content;
 	min-width: -moz-fit-content;
 }

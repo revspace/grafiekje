@@ -1,15 +1,25 @@
 "use strict";
 
-const INFLUX_URL = "http://192.168.1.14:8086/query";
+const INFLUX_URL = "http://local.roysmeding.nl:8086/query";
 const INFLUX_DATABASE = "mqtt";
 
 const POINT_SIZE = 5;
-const UPDATE_INTERVAL = 10000;
+const UPDATE_INTERVAL = 2000;
 
 const MARGIN = {top: 10, right: 60, bottom: 30, left: 60},
     FULL_WIDTH   = 960, FULL_HEIGHT = 500,
     GRAPH_WIDTH  = FULL_WIDTH - MARGIN.left - MARGIN.right,
     GRAPH_HEIGHT = FULL_HEIGHT - MARGIN.top - MARGIN.bottom;
+
+const TIME_SCALES = [
+		["10s",           10000],
+		["1m",          60*1000],
+		["10m",      10*60*1000],
+		["1h",       60*60*1000],
+		["6h",     6*60*60*1000],
+		["1d",    24*60*60*1000],
+		["1w",  7*24*60*60*1000]
+	].reverse();
 
 var influxTime = d3.time.format.iso;
 
@@ -22,26 +32,73 @@ function influxQuery(query, callback) {
 
 function sensibleRange(array, accessor) {
 	let sorted = array.map(accessor).sort(d3.ascending);
-	return [d3.quantile(sorted, 0.01), d3.quantile(sorted, 0.99)];
+	return [d3.quantile(sorted, 0.001), d3.quantile(sorted, 0.999)];
 }
 
+function autoScaleX(graph) {
+	let allData = d3.merge(graph.data);
+	let xExtents = d3.extent(allData, function(d) { return d.x; });
 
-function autoScale(graph, data) {
-	let xExtents = d3.extent(data, function(d) { return d.x; }),
-	    yExtents = sensibleRange(data, function(d) { return d.y; });
+	graph.xScale.domain(xExtents).nice();
+	graph.zoom.x(graph.xScale);
 
-	graph.xScale.domain(xExtents).nice(d3.time.hour);
+	redraw(graph);
+}
+
+function autoScaleY(graph) {
+	let xDomain = graph.xScale.domain().map(function(t) { return t.getTime(); });
+	let allData = d3.merge(graph.data).filter(function(d) { return (d.x.getTime() >= xDomain[0]) && (d.x.getTime() <= xDomain[1]); });
+	let yExtents = sensibleRange(allData, function(d) { return d.y; });
+
 	graph.yScale.domain(yExtents).nice();
 
-	graph.zoom.x(graph.xScale)
-		  .y(graph.yScale);
-
-	updateScales(graph);
+	redraw(graph);
 }
 
-function updateScales(graph) {
+function autoScale(graph) {
+	let allData = d3.merge(graph.data);
+
+	let xExtents = d3.extent(allData, function(d) { return d.x; }),
+	    yExtents = sensibleRange(allData, function(d) { return d.y; });
+
+	graph.xScale.domain(xExtents).nice();
+	graph.yScale.domain(yExtents).nice();
+
+	graph.zoom.x(graph.xScale);
+
+	redraw(graph);
+}
+
+function setXRes(graph, width) {
+	let cur    = graph.xScale.domain().map(function(d) { return d.getTime(); });
+	let center = (cur[0]+cur[1])/2;
+	graph.xScale.domain([new Date(center-width/2), new Date(center+width/2)]);
+
+	scrollX(graph);
+}
+
+function scrollX(graph) {
+	let curX = graph.xScale.domain().map(function(d) { return d.getTime(); });
+	let endX = new Date(), startX = new Date(endX.getTime() - (curX[1] - curX[0]));
+
+	graph.xScale.domain([startX, endX]);
+
+	graph.zoom.x(graph.xScale);
+
+	redraw(graph);
+}
+
+function redraw(graph) {
 	let g = d3.select(graph);
 	
+	let xDom  = graph.xScale.domain().map(function(d) { return d.getTime(); });
+	let xSize = xDom[1] - xDom[0];
+
+	window.clearTimeout(graph.redrawTimer);
+
+	let redrawInterval = xSize/GRAPH_WIDTH;
+	graph.redrawTimer = window.setTimeout(function() { scrollX(graph) }, redrawInterval);
+
 	g.select(".xAxis").call(graph.xAxis);
 	g.select(".yAxis").call(graph.yAxis);
 
@@ -56,7 +113,7 @@ function updateScales(graph) {
 		}
 
 		let start = block[0] ? graph.xScale(block[0]) : 0,
-		    end   = block[1] ? graph.xScale(block[1]) : ctx.canvas.width;
+		    end   = block[1] ? graph.xScale(block[1]) : graph.xScale(new Date());
 
 		if((start > ctx.canvas.width) || (end < 0)) return;
 
@@ -75,11 +132,6 @@ function updateScales(graph) {
 		ctx.stroke();
 	});
 
-	let line = d3_shape.line()
-		.x(function(d) { return graph.xScale(d.x); })
-		.y(function(d) { return graph.yScale(d.y); })
-		.curve(d3_shape.curveStepBefore);
-
 	let symbol = d3_shape.symbol()
 		.size(6);
 
@@ -87,19 +139,28 @@ function updateScales(graph) {
 		let c = d3.rgb(graph.colorScale(graph.topics[idx]));
 
 		ctx.beginPath();
-		line.context(ctx)(data);
+		graph.dataLine.context(ctx)(data);
 		ctx.strokeStyle = 'rgba('+c.r+','+c.g+','+c.b+',0.7)';
 		ctx.lineWidth = 1;
 		ctx.stroke();
 
+/*		ctx.beginPath();
+		graph.dataArea.context(ctx)(data);
+		ctx.fillStyle = 'rgba('+c.r+','+c.g+','+c.b+',0.3)';
+		ctx.fill();*/
+
 		ctx.fillStyle = c.toString();
-		data.forEach(function(d) {
-			ctx.beginPath();
-			ctx.setTransform(1,0,0,1,graph.xScale(d.x),graph.yScale(d.y));
-			symbol.context(ctx)();
-			ctx.fill();
-		});
-		ctx.setTransform(1,0,0,1,0,0);
+		if(xSize < (2*60*60*1000)) {
+			data
+				.filter(function(d) { let t = d.x.getTime(); return (t > xDom[0]) && (t < xDom[1]); })
+				.forEach(function(d) {
+				ctx.beginPath();
+				ctx.setTransform(1,0,0,1,graph.xScale(d.x),graph.yScale(d.y));
+				symbol.context(ctx)();
+				ctx.fill();
+			});
+			ctx.setTransform(1,0,0,1,0,0);
+		}
 	});
 }
 
@@ -108,7 +169,7 @@ function graphDataReceived(graph, error, json) {
 
 	if(!json.results) return console.warn("Results field lacking from InfluxDB query response");
 
-	var first_time = !(graph.data[0].length);
+	let first_time = !(graph.data[0].length);
 
 	for(let result of json.results) {
 		if(!result.series) continue;	// empty data set
@@ -125,9 +186,8 @@ function graphDataReceived(graph, error, json) {
 	}
 
 	if(first_time) {
-		let allData = d3.merge(json.results.map(function(r) { return r.series[0].values.map(function(d) { return { "x":influxTime.parse(d[0]), "y":d[1] }; }); }));
-
-		autoScale(graph, allData);
+		setXRes(graph, 10*60*1000);
+		autoScaleY(graph);
 	}
 }
 
@@ -163,7 +223,9 @@ function spaceStateDataReceived(error, json) {
 		}
 	});
 
-	spaceState.push([prevTime, new Date(), prevState]);
+	spaceState.push([prevTime, null, prevState]);
+
+	d3.selectAll(".graph").each(function() { redraw(this); });
 }
 
 function updateGraph(graph) {
@@ -172,8 +234,6 @@ function updateGraph(graph) {
 		query += "SELECT value FROM \""+topic.replace('"', '\\"')+"\"";
 		if(graph.lastUpdate[idx])
 			query += " WHERE time > '" + influxTime(graph.lastUpdate[idx]) + "'";
-		else
-			query += " WHERE time > now() - 24h";
 		query += ';';
 	});
 	influxQuery(query, function(error, json) { return graphDataReceived(graph, error, json); });
@@ -185,7 +245,7 @@ function updateSpaceState() {
 	if(spaceState.length)
 		query = 'SELECT * FROM "revspace/state" WHERE time > \''+influxTime(spaceState[spaceState.length-1][0])+'\' + 1s;';
 	else
-		query = 'SELECT * FROM "revspace/state" WHERE time > now() - 24h;';
+		query = 'SELECT * FROM "revspace/state";';
 	influxQuery(query, spaceStateDataReceived);
 	window.setTimeout(updateSpaceState, UPDATE_INTERVAL);
 }
@@ -208,7 +268,6 @@ function setupGraph() {
 
 	graph.unit   = data.unit   ? data.unit                  : "";
 	graph.yRange = data.range  ? data.range.split(/-\s*/,2) : undefined;
-	graph.interp = data.interp ? data.interp                : "linear";
 	graph.title  = data.title  ? data.title                 : "";
 
 	graph.lastUpdate = {};
@@ -217,10 +276,20 @@ function setupGraph() {
 		.domain([new Date(), new Date()])
 		.range([0,GRAPH_WIDTH]);
 
-	switch(graph.dataset.scale) {
+	switch(data.scale) {
 		case 'log':    graph.yScale = d3.scale.log();    break;
 		case 'linear': graph.yScale = d3.scale.linear(); break;
 		default:       graph.yScale = d3.scale.linear(); break;
+	}
+
+	switch(data.interp) {
+		case 'stepBefore': graph.curve = d3_shape.curveStepBefore; break;
+		case 'basis':      graph.curve = d3_shape.curveBasis;      break;
+		case 'bundle':     graph.curve = d3_shape.curveBundle;     break;
+		case 'natural':    graph.curve = d3_shape.curveNatural;    break;
+		case 'catmullRom': graph.curve = d3_shape.curveCatmullRom; break;
+		case 'cardinal':   graph.curve = d3_shape.curveCardinal;   break;
+		default:           graph.curve = d3_shape.curveLinear;     break;
 	}
 	
 	graph.yScale.domain(graph.yRange);
@@ -230,17 +299,21 @@ function setupGraph() {
 
 	graph.zoom = d3.behavior.zoom()
 		.x(graph.xScale)
-		.y(graph.yScale)
-		.scaleExtent([0.1, 42])
-		.on("zoom", function() { updateScales(graph); } );
+		.on("zoom", function() { autoScaleY(graph); } );
 
-	graph.dataLine = d3.svg.line()
+	graph.dataLine = d3_shape.line()
 		.x(function(d) { return graph.xScale(d.x); })
 		.y(function(d) { return graph.yScale(d.y); })
-		.interpolate(graph.interp);
+		.curve(graph.curve);
+
+/*	graph.dataArea = d3_shape.area()
+		.x(function(d) { return graph.xScale(d.x); })
+		.y(function(d) { return graph.yScale(d.y); })
+		.y1(function(d) { return graph.yScale(0); })
+		.curve(graph.curve);*/
 
 	let legend = g.append("ul")
-		.attr("class", "legend");
+		.attr("class", "sidebar legend");
 
 	graph.names.forEach(function(name, idx) {
 		let topic = graph.topics[idx];
@@ -249,6 +322,19 @@ function setupGraph() {
 			.attr("title", topic)
 			.style("background", graph.colorScale(topic));
 	});
+
+	let controls = g.append("div")
+		.attr("class", "sidebar controls");
+
+	controls.append("button")
+		.text("all time")
+		.on("click", function() { autoScale(graph); });
+
+	for(let ts of TIME_SCALES) {
+		controls.append("button")
+			.text(ts[0])
+			.on("click", function() { setXRes(graph, ts[1]); });
+	}
 
 	graph.xAxis = d3.svg.axis()
 			.scale(graph.xScale)
@@ -261,9 +347,8 @@ function setupGraph() {
 	graph.yAxis = d3.svg.axis()
 			.scale(graph.yScale)
 			.orient("left")
-			.ticks(5,formatValue(graph.unit))
-			.tickSize(-GRAPH_WIDTH)
-			.tickPadding(8);
+			.ticks(5)
+			.tickFormat(formatValue(graph.unit));
 
 	let axes = g.select(".axes")
 		.attr("width",  FULL_WIDTH)
